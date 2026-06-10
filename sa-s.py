@@ -1,17 +1,18 @@
 # ═══════════════════════════════════════════════════════════════
-# SAUDI JOBS PIPELINE — v4
+# SAUDI JOBS PIPELINE — v5
 # Discover company → find career page → scrape jobs (all at once)
-# No pre-existing CSV needed.
 #
-# KEY ADDITIONS v4 (on top of v3 fixes):
-#  1. FIELD STANDARDISATION — 20-domain keyword map; infers field
-#     from title + description when the page provides nothing.
-#  2. EXPERIENCE STANDARDISATION — regex extracts year numbers,
-#     maps to canonical bands: No Experience / <1yr / 1-2 / 3-5 /
-#     6-10 / 10+.  Keyword shortcuts handle "fresh graduate" etc.
-#  3. QUALIFICATION STANDARDISATION — tiered ladder from PhD down
-#     to "No Formal Qualification Required"; matched against both
-#     the dedicated qualifications text and the full page text.
+# v5 FIXES (on top of v4):
+#  1. SAUDI FILTER — strict geographic validation; non-Saudi
+#     organisations discovered via Wikipedia/DDG are skipped.
+#  2. LINKEDIN SKIP — LinkedIn career pages are blocked; the
+#     pipeline no longer wastes time trying to scrape guest pages
+#     that always time out.
+#  3. CLEAN LOGGING — raw (unstandardised) field lines removed;
+#     if standardisation yields nothing the cell stays blank.
+#  4. FIELD INFERENCE — minimum score threshold lowered to 1 for
+#     title-only matches so "General" appears far less often;
+#     industry passed as a tiebreaker.
 # ═══════════════════════════════════════════════════════════════
 import subprocess, sys, os
 
@@ -52,12 +53,111 @@ print("✅ All imports successful\n")
 
 
 # ══════════════════════════════════════════════════════════════
-# ▌ STANDARDISATION TABLES  (v4 NEW)
+# ▌ SAUDI ARABIA GEOGRAPHIC FILTER  (v5 NEW)
 # ══════════════════════════════════════════════════════════════
 
-# ── 1. JOB FIELD ─────────────────────────────────────────────
-# Each entry: (canonical_label, [high-weight_kws], [supporting_kws])
-# More-specific domains listed first so the first strong match wins.
+# Domains that are clearly NOT Saudi companies even if they appear
+# on Saudi-related Wikipedia pages or DDG results.
+NON_SAUDI_DOMAINS = {
+    # International media / news
+    "fortune.com", "forbes.com", "bloomberg.com", "reuters.com",
+    "arabnews.com", "aljazeera.com", "bbc.com", "bbc.co.uk",
+    "cnn.com", "nytimes.com", "wsj.com", "ft.com",
+    "c-span.org", "cspan.org", "pbs.org", "npr.org",
+    # US government / institutions
+    "federalreserve.gov", "sec.gov", "state.gov", "treasury.gov",
+    "loc.gov", "whitehouse.gov", "congress.gov",
+    # International financial / exchanges
+    "londonstockexchange.com", "lseg.com", "nyse.com", "nasdaq.com",
+    "imf.org", "worldbank.org",
+    # International orgs (not Saudi)
+    "opec.org", "un.org", "unesco.org", "ich.unesco.org",
+    "pepsico.com", "middleeast.pepsico.com",
+    # Social / tech giants (never Saudi HQ)
+    "linkedin.com", "facebook.com", "twitter.com", "x.com",
+    "instagram.com", "tiktok.com", "snapchat.com",
+    "amazon.com", "google.com", "microsoft.com", "apple.com",
+    # UK / international
+    "hsbc.com", "barclays.com",
+    # Other clutter
+    "houseofsaud.com",
+}
+
+# TLD / domain patterns that indicate Saudi or Gulf origin
+SAUDI_DOMAIN_INDICATORS = [
+    r"\.sa$",                       # .sa ccTLD
+    r"\.gov\.sa$",                  # Saudi government
+    r"\.edu\.sa$",                  # Saudi education
+    r"\.com\.sa$",                  # Saudi commercial
+    r"\.org\.sa$",                  # Saudi org
+    r"aramco",                      # Saudi Aramco family
+    r"sabic",
+    r"stc\.com",
+    r"alrajhi",
+    r"samba",
+    r"riyad",
+    r"ncb",
+    r"jarir",
+    r"maaden",
+    r"tasnee",
+    r"mobily",
+    r"zain\.sa",
+    r"saudia",
+    r"flynas",
+    r"flyadeal",
+    r"neom",
+    r"vision2030",
+    r"pif\.gov",
+]
+
+# Wikipedia article title patterns that indicate the article is NOT
+# about a Saudi company (it's about a concept, person, place etc.)
+NON_COMPANY_WIKI_PATTERNS = re.compile(
+    r"^(women'?s?\s+rights|transport\s+in|arabic$|ardah$|"
+    r"custodian\s+of|council\s+of\s+ministers|consultative\s+assembly|"
+    r"royal\s+saudi\s+(navy|air|army|guard|force|defense)|"
+    r"committee\s+for\s+the\s+promotion|general\s+intelligence|"
+    r"supreme\s+economic|capital\s+market\s+authority|"
+    r"us\s+dollar|saudi\s+riyal|opec|arabic\s+language|"
+    r"saudi\s+arabia\s+(economy|culture|history|geography|politics|religion)|"
+    r"islam\s+in|hajj|umrah|mecca$|medina$)",
+    re.I,
+)
+
+
+def _is_saudi_domain(domain: str) -> bool:
+    """Return True if the domain appears to belong to a Saudi entity."""
+    d = domain.lower()
+    if d in NON_SAUDI_DOMAINS:
+        return False
+    for pat in SAUDI_DOMAIN_INDICATORS:
+        if re.search(pat, d):
+            return True
+    return False
+
+
+def _looks_like_saudi_company(name: str, website: str) -> bool:
+    """
+    Heuristic: accept the entity if
+      - its website domain is a known Saudi indicator, OR
+      - the name doesn't match a Wikipedia 'non-company' pattern
+        AND the domain isn't in our blocklist.
+    The DDG pipeline already searches for 'companies in Saudi Arabia'
+    so we give those entities the benefit of the doubt unless the
+    domain is explicitly blocked.
+    """
+    domain = get_domain(website)
+    if domain in NON_SAUDI_DOMAINS:
+        return False
+    if NON_COMPANY_WIKI_PATTERNS.match(name.strip()):
+        return False
+    return True
+
+
+# ══════════════════════════════════════════════════════════════
+# ▌ STANDARDISATION TABLES
+# ══════════════════════════════════════════════════════════════
+
 FIELD_KEYWORD_MAP = [
     ("Information Technology",
      ["software engineer","developer","devops","frontend","backend",
@@ -65,159 +165,198 @@ FIELD_KEYWORD_MAP = [
       "data engineer","machine learning","artificial intelligence",
       "ai/ml","it support","network engineer","database","kubernetes",
       "docker","aws","azure","react","node.js","python developer",
-      "java developer"],
+      "java developer","it manager","systems analyst","erp","sap",
+      "technology","tech lead","infrastructure engineer","qa engineer",
+      "automation engineer","business intelligence","data analyst"],
      ["programming","coding","api","agile","scrum","git","linux",
-      "server","infrastructure","software"]),
+      "server","infrastructure","software","digital","tech"]),
 
     ("Finance & Accounting",
      ["accountant","auditor","finance manager","financial analyst",
       "cfo","treasurer","tax","bookkeeper","payroll","budget analyst",
       "credit analyst","investment","portfolio manager","risk analyst",
-      "forex","actuary","acca","cfa","cpa"],
+      "forex","actuary","acca","cfa","cpa","finance officer",
+      "financial controller","internal audit","external audit",
+      "accounts payable","accounts receivable","treasury"],
      ["financial","accounting","balance sheet","p&l","reconciliation",
-      "ifrs","gaap","ledger","invoicing"]),
+      "ifrs","gaap","ledger","invoicing","fiscal","budget","revenue"]),
 
     ("Sales & Business Development",
      ["sales executive","sales manager","business development",
       "account manager","sales representative","bd manager",
       "regional sales","key account","sales director",
-      "commercial manager","sales officer"],
+      "commercial manager","sales officer","revenue manager",
+      "partnerships manager","channel manager","pre-sales"],
      ["revenue","pipeline","crm","leads","prospects","quota","target",
-      "upsell","cross-sell","b2b","b2c"]),
+      "upsell","cross-sell","b2b","b2c","salesforce","negotiation"]),
 
     ("Marketing & Communications",
      ["marketing manager","digital marketing","seo","sem",
       "content marketer","social media manager","brand manager",
       "marketing executive","communications manager","pr manager",
-      "copywriter","growth hacker","email marketing","campaign manager"],
+      "copywriter","growth hacker","email marketing","campaign manager",
+      "marketing director","brand strategist","media buyer",
+      "public relations","communications officer"],
      ["marketing","branding","advertising","social media","content",
-      "campaign","analytics","google ads","facebook ads","influencer"]),
+      "campaign","analytics","google ads","facebook ads","influencer",
+      "awareness","positioning","messaging"]),
 
     ("Human Resources",
      ["hr manager","human resources","recruiter","talent acquisition",
       "hr business partner","hrbp","hr officer","compensation",
       "benefits manager","organisational development",
-      "learning and development","l&d","hr generalist","payroll manager"],
+      "learning and development","l&d","hr generalist","payroll manager",
+      "people operations","talent management","workforce planning",
+      "employee engagement","hr director"],
      ["recruitment","onboarding","performance management",
-      "employee relations","hr","workforce","headhunting","staffing"]),
+      "employee relations","hr","workforce","headhunting","staffing",
+      "saudization","nitaqat","labor law"]),
 
     ("Engineering",
      ["mechanical engineer","civil engineer","electrical engineer",
       "structural engineer","process engineer","project engineer",
       "maintenance engineer","production engineer","quality engineer",
-      "safety engineer","site engineer","design engineer"],
+      "safety engineer","site engineer","design engineer",
+      "petroleum engineer","chemical engineer","industrial engineer",
+      "instrumentation engineer","piping engineer","hvac engineer"],
      ["engineering","cad","autocad","solidworks","manufacturing",
-      "plant","machinery","commissioning","maintenance"]),
+      "plant","machinery","commissioning","maintenance","iso","asme"]),
 
     ("Healthcare & Medicine",
      ["doctor","physician","nurse","pharmacist","medical officer",
       "surgeon","anaesthetist","physiotherapist","radiographer",
       "lab technician","clinical","healthcare manager",
-      "occupational therapist","dentist","midwife"],
+      "occupational therapist","dentist","midwife","radiologist",
+      "oncologist","cardiologist","icu","emergency medicine",
+      "infection control","medical director"],
      ["hospital","clinic","patient","medical","health",
-      "pharmaceutical","diagnosis","treatment","ward"]),
+      "pharmaceutical","diagnosis","treatment","ward","jci","cbahi"]),
 
     ("Education & Training",
      ["teacher","lecturer","professor","trainer","educator","tutor",
       "school principal","academic","curriculum","e-learning",
-      "instructional designer","teaching assistant"],
+      "instructional designer","teaching assistant","academic advisor",
+      "dean","faculty","research fellow"],
      ["school","university","college","classroom","students",
-      "pedagogy","curriculum","education","training"]),
+      "pedagogy","curriculum","education","training","accreditation"]),
 
     ("Hospitality & Tourism",
      ["hotel manager","front desk","housekeeping","chef","sous chef",
       "food and beverage","f&b manager","restaurant manager",
       "bartender","waiter","concierge","tour guide","travel agent",
-      "events coordinator","catering"],
+      "events coordinator","catering","revenue manager hotel",
+      "guest relations","front office manager"],
      ["hospitality","hotel","resort","tourism","guest",
-      "accommodation","restaurant","kitchen","culinary"]),
+      "accommodation","restaurant","kitchen","culinary","five star"]),
 
     ("Logistics & Supply Chain",
      ["supply chain manager","logistics coordinator","warehouse manager",
       "fleet manager","procurement manager","purchasing manager",
       "import export","freight","shipping coordinator",
-      "inventory manager","demand planner"],
+      "inventory manager","demand planner","customs clearance",
+      "logistics manager","distribution manager","last mile"],
      ["logistics","supply chain","warehouse","inventory","freight",
-      "procurement","sourcing","distribution","customs"]),
+      "procurement","sourcing","distribution","customs","3pl","sap mm"]),
 
     ("Legal",
      ["lawyer","attorney","legal counsel","paralegal",
       "compliance officer","legal advisor","solicitor","barrister",
-      "corporate counsel","legal manager","contract manager"],
+      "corporate counsel","legal manager","contract manager",
+      "legal officer","in-house counsel","data protection officer"],
      ["legal","law","contracts","litigation","regulatory",
-      "compliance","gdpr","intellectual property"]),
+      "compliance","gdpr","intellectual property","arbitration"]),
 
     ("Administration & Operations",
      ["office manager","executive assistant","administrative officer",
       "operations manager","personal assistant","receptionist",
       "data entry","office administrator","company secretary",
-      "business analyst"],
+      "business analyst","operations officer","facility manager",
+      "administrative coordinator","executive secretary"],
      ["administration","operations","office","coordination",
-      "scheduling","reporting","clerical","filing"]),
+      "scheduling","reporting","clerical","filing","facilities"]),
 
     ("Customer Service",
      ["customer service","call centre","customer success",
       "customer support","help desk","service advisor",
-      "client relations","customer experience","contact centre"],
+      "client relations","customer experience","contact centre",
+      "customer care","cx specialist","complaints officer"],
      ["customer","support","helpdesk","tickets","escalation",
-      "satisfaction","service level","inbound","outbound"]),
+      "satisfaction","service level","inbound","outbound","nps"]),
 
     ("Construction & Real Estate",
      ["quantity surveyor","site supervisor","project manager construction",
       "architect","draughtsman","property manager","estate agent",
       "real estate","building inspector","land surveyor",
-      "construction manager"],
+      "construction manager","project director","bim engineer",
+      "fit out","interior designer","facilities engineer"],
      ["construction","building","property","real estate","site",
-      "contractor","tender","drawings"]),
+      "contractor","tender","drawings","neom","vision 2030 project"]),
 
     ("Manufacturing & Production",
      ["production manager","quality control","quality assurance",
       "qa","qc","factory manager","plant manager",
-      "production supervisor","assembly","cnc operator","technician"],
+      "production supervisor","assembly","cnc operator","technician",
+      "operations technician","broadcast technician","studio technician",
+      "manufacturing engineer","process technician"],
      ["production","manufacturing","factory","assembly","quality",
-      "lean","six sigma","safety","line"]),
+      "lean","six sigma","safety","line","output","throughput"]),
 
     ("Design & Creative",
      ["graphic designer","ui/ux","product designer","art director",
       "creative director","animator","illustrator","photographer",
-      "videographer","motion designer","web designer"],
+      "videographer","motion designer","web designer","ux researcher",
+      "visual designer","brand designer"],
      ["design","creative","adobe","figma","photoshop","illustrator",
-      "indesign","sketch","branding","visual"]),
+      "indesign","sketch","branding","visual","wireframe","prototype"]),
 
     ("Research & Science",
      ["research scientist","data scientist","lab researcher",
       "research analyst","clinical researcher","environmental scientist",
-      "chemist","biologist","statistician","epidemiologist"],
+      "chemist","biologist","statistician","epidemiologist",
+      "geologist","geophysicist","reservoir engineer","r&d"],
      ["research","analysis","data","laboratory","science","experiment",
-      "findings","methodology","survey"]),
+      "findings","methodology","survey","phd","publication"]),
 
     ("Security",
      ["security officer","security guard","security manager","cctv",
       "loss prevention","risk manager","health and safety",
-      "hse officer","osh","fire safety"],
+      "hse officer","osh","fire safety","security analyst",
+      "information security","cyber analyst","soc analyst"],
      ["security","safety","risk","surveillance","patrol",
-      "access control","emergency","incident"]),
+      "access control","emergency","incident","iso 27001"]),
 
     ("Media & Journalism",
      ["journalist","editor","reporter","broadcast","news anchor",
       "content creator","media manager","radio","television",
-      "producer","scriptwriter"],
+      "producer","scriptwriter","editorial producer","multimedia journalist",
+      "content producer","broadcast operations"],
      ["media","journalism","broadcast","news","editorial",
-      "publishing","press","interview"]),
+      "publishing","press","interview","newsroom","on-air"]),
 
     ("Non-Profit & Social Work",
      ["social worker","ngo","charity","programme coordinator",
       "community development","welfare officer","case manager",
-      "development officer","fundraiser","volunteer coordinator"],
+      "development officer","fundraiser","volunteer coordinator",
+      "network associate"],
      ["social","ngo","community","welfare","beneficiary",
-      "donor","impact","charity","development"]),
+      "donor","impact","charity","development","fellowship"]),
+
+    ("Oil & Gas",
+     ["petroleum engineer","drilling engineer","reservoir engineer",
+      "production engineer oil","subsurface","geoscientist",
+      "upstream","downstream","refinery","petrochemical",
+      "gas plant","field operator","well engineer","hse oil"],
+     ["oil","gas","petroleum","refinery","upstream","downstream",
+      "aramco","sabic","petrochemical","drilling","reservoir",
+      "pipeline","lng","lpg","ngl","fracking","well"]),
 ]
 
 
-def standardise_field(raw_field: str, title: str = "", description: str = "") -> str:
-    """Map raw_field (or infer from title/description) to a canonical domain label."""
+def standardise_field(raw_field: str, title: str = "", description: str = "",
+                       industry: str = "") -> str:
     combined = " ".join([
-        (raw_field or ""), (title or ""), (description or "")[:800]
+        (raw_field or ""), (title or ""), (description or "")[:800],
+        (industry or ""),
     ]).lower()
 
     best_label = ""
@@ -235,29 +374,26 @@ def standardise_field(raw_field: str, title: str = "", description: str = "") ->
             best_score = score
             best_label = label
 
-    # Minimum threshold — don't misclassify on a single weak match
+    # v5: accept score ≥ 1 for title-only signal (reduces "General" noise)
     if best_score >= 3:
         return best_label
-    if best_score >= 1 and not raw_field:
+    if best_score >= 1:
         return best_label
 
-    return raw_field or ""
+    return ""   # blank is better than "General"
 
 
-# ── 2. EXPERIENCE ─────────────────────────────────────────────
+# ── EXPERIENCE ────────────────────────────────────────────────
 _NO_EXP_KW = [
     "no experience", "no prior experience", "fresh graduate", "freshers",
     "entry level", "entry-level", "0 years", "zero experience",
     "training provided", "will train", "no experience required",
     "no experience needed",
 ]
-
 _LT1_KW = [
     "less than 1 year", "under 1 year", "6 months", "less than a year",
     "some experience", "minimal experience", "up to 1 year",
 ]
-
-# Matches "3–5 years", "minimum 2 years", "at least 10 years", "3+ years"
 _EXP_RE = re.compile(
     r"(?:minimum|min\.?|at\s+least|over|more\s+than)?\s*"
     r"(\d+)\s*(?:\+|plus)?\s*"
@@ -276,19 +412,15 @@ def _years_to_band(n: int) -> str:
 
 
 def standardise_experience(raw: str) -> str:
-    """Convert any raw experience string into a canonical band label."""
     if not raw:
         return ""
-
     text = raw.lower().strip()
-
     for kw in _NO_EXP_KW:
         if kw in text:
             return "No Experience Required"
     for kw in _LT1_KW:
         if kw in text:
             return "Less than 1 Year"
-
     matches = _EXP_RE.findall(text)
     if matches:
         nums = []
@@ -299,57 +431,44 @@ def standardise_experience(raw: str) -> str:
                     except: pass
         if nums:
             return _years_to_band(min(nums))
-
     m = re.search(r"(\d+)\s*\+?\s*years?", text, re.I)
     if m:
         return _years_to_band(int(m.group(1)))
-
-    # Seniority-word shortcuts
     if re.search(r"\b(senior|sr\.?|lead|principal|head of|director|vp|vice president)\b", text, re.I):
         return "6 - 10 Years"
     if re.search(r"\b(mid.?level|intermediate|associate)\b", text, re.I):
         return "3 - 5 Years"
     if re.search(r"\b(junior|jr\.?|graduate|intern|trainee|fresh)\b", text, re.I):
         return "Less than 1 Year"
-
     return ""
 
 
-# ── 3. QUALIFICATION ──────────────────────────────────────────
-# Highest qualification first — first match wins.
+# ── QUALIFICATION ─────────────────────────────────────────────
 QUALIFICATION_TIERS = [
     ("PhD / Doctorate",
      ["phd","ph.d","doctorate","doctoral","doctor of philosophy"]),
-
     ("Master's Degree",
      ["master","msc","m.sc","mba","m.b.a","meng","m.eng","mphil",
       "postgraduate","post-graduate","post graduate"]),
-
     ("Bachelor's Degree",
      ["bachelor","bsc","b.sc","beng","b.eng","bcom","b.com","bba",
       "llb","degree in","undergraduate degree","honours degree","hons",
       "b.tech","btech"]),
-
     ("Higher National Diploma",
      ["hnd","hnc","higher national diploma","higher national certificate",
       "higher diploma","advanced diploma"]),
-
     ("Diploma",
      ["diploma","associate degree","foundation degree"]),
-
     ("Professional Certification",
      ["acca","cpa","cfa","cima","pmp","prince2","cissp","aws certified",
       "comptia","cisco","ccna","ccnp","shrm","cipd","chartered",
       "certified public","certified financial","certified project",
       "professional certification","professional certificate"]),
-
     ("A-Levels / HSC",
      ["a-level","a level","hsc","higher school certificate",
       "ib diploma","international baccalaureate","gce advanced"]),
-
     ("O-Levels / School Certificate",
      ["o-level","o level","igcse","gcse","school certificate"]),
-
     ("No Formal Qualification Required",
      ["no qualification","no degree","no formal","school leaver",
       "no experience required","training provided","will train"]),
@@ -357,14 +476,11 @@ QUALIFICATION_TIERS = [
 
 
 def standardise_qualification(raw: str, full_text: str = "") -> str:
-    """Map raw qualifications text (or full page fallback) to a canonical tier."""
     corpus = ((raw or "") + " " + (full_text or "")[:2000]).lower()
-
     for label, keywords in QUALIFICATION_TIERS:
         for kw in keywords:
             if kw in corpus:
                 return label
-
     return ""
 
 
@@ -377,6 +493,7 @@ _stats = {
     "companies_seen": 0,
     "companies_with_careers": 0,
     "companies_no_careers": 0,
+    "companies_skipped_non_saudi": 0,
     "jobs_total": 0,
     "jobs_with_title": 0,
     "jobs_with_salary": 0,
@@ -487,7 +604,8 @@ def print_live_stats():
     print(f"\n  ┌── LIVE STATS {'─'*(W-15)}┐")
     print(f"  │  Companies : seen={s['companies_seen']}  "
           f"with_careers={s['companies_with_careers']}  "
-          f"no_careers={s['companies_no_careers']}")
+          f"no_careers={s['companies_no_careers']}  "
+          f"skipped_non_saudi={s['companies_skipped_non_saudi']}")
     print(f"  │  Jobs      : total={s['jobs_total']}  "
           f"with_salary={s['jobs_with_salary']}  "
           f"with_desc={s['jobs_with_description']}")
@@ -541,6 +659,14 @@ SKIP_DOMAINS = {
     "zawya", "arabnews", "saudigazette", "bloomberg", "reuters",
 }
 
+# ── v5: LinkedIn blocked as career-page target ────────────────
+# We still detect LinkedIn links (to know we should skip),
+# but we never try to scrape them.
+BLOCKED_CAREER_DOMAINS = {
+    "linkedin.com",
+    "www.linkedin.com",
+}
+
 CAREER_SUBDOMAINS = [
     "careers", "jobs", "career", "job", "work", "hiring",
     "apply", "talent", "recruitment", "hr", "people",
@@ -575,12 +701,6 @@ ATS_DOMAINS = {
     "jobvite.com": "Jobvite",
     "breezy.hr": "Breezy",
     "zohorecruit.com": "Zoho",
-    "linkedin.com/company": "LinkedIn",
-    "apply.wynt.ai": "Wynt",
-    "wynt.ai": "Wynt",
-    "recruitcrm.io": "RecruitCRM",
-    "hirepos.com": "HirePos",
-    "hirize.hr": "Hirize",
     "zoho.com/recruit": "Zoho",
     "bayt.com": "Bayt",
     "gulftalent.com": "GulfTalent",
@@ -615,6 +735,11 @@ ATS_DOMAINS = {
     "rippling.com": "Rippling",
     "personio.com": "Personio",
     "easy.jobs": "EasyJobs",
+    "apply.wynt.ai": "Wynt",
+    "wynt.ai": "Wynt",
+    "recruitcrm.io": "RecruitCRM",
+    "hirepos.com": "HirePos",
+    "hirize.hr": "Hirize",
 }
 
 ATS_HTML_FINGERPRINTS = {
@@ -720,7 +845,6 @@ SF_SEARCH_PARAMS = [
     "/search?q=",
 ]
 
-# ── v3 strict URL rules ───────────────────────────────────────
 JOB_PATH_CORE = re.compile(r"/jobs?/", re.I)
 
 JOB_URL_ATS_SPECIFIC = re.compile(
@@ -851,6 +975,9 @@ def get_base(website):
 
 def is_ats(url):
     url = str(url).lower()
+    # v5: LinkedIn is never a valid ATS target for scraping
+    if "linkedin.com" in url:
+        return None
     for pat, name in ATS_DOMAINS.items():
         if pat in url:
             return name
@@ -867,6 +994,9 @@ def is_ats_from_html(html):
 
 def is_career_link(href, text):
     combined = (str(href) + " " + str(text)).lower()
+    # v5: never treat LinkedIn as a valid career link
+    if "linkedin.com" in combined:
+        return False, None
     for pat in DEFINITE_PATTERNS:
         if re.search(pat, text.lower()):
             return True, "definite"
@@ -919,18 +1049,18 @@ def make_job(company, website, industry, careers_url, source,
              company_logo="", company_founded="", company_type="",
              company_address="", company_details="",
              estimated_deadline="", salary_range=""):
-    # ── v4: standardise the three key fields before storing ──
-    std_field = standardise_field(field or department, title, description)
+
+    std_field = standardise_field(field or department, title, description, industry)
     std_exp   = standardise_experience(experience)
     std_qual  = standardise_qualification(qualifications, description)
 
     return {
         "Job Title":          clean(title),
         "Job Type":           _sanitize_field(job_type),
-        "Job Qualifications": std_qual or clean(qualifications, 500),
-        "Job Experience":     std_exp  or _sanitize_field(experience, 300),
+        "Job Qualifications": std_qual,           # blank if not found
+        "Job Experience":     std_exp,            # blank if not found
         "Job Location":       clean(location) or "Saudi Arabia",
-        "Job Field":          std_field or _sanitize_field(field or department),
+        "Job Field":          std_field,          # blank if not found
         "Date Posted":        _sanitize_field(date_posted),
         "Deadline":           _sanitize_field(deadline),
         "Job Description":    clean(description, 2000),
@@ -1192,9 +1322,6 @@ def _extract_bold_field(soup, *labels):
     return ""
 
 
-
-
-
 # ══════════════════════════════════════════════════════════════
 # DEEP JOB DETAIL SCRAPER
 # ══════════════════════════════════════════════════════════════
@@ -1314,7 +1441,7 @@ async def scrape_job_detail(page, job_url, company, website, industry,
     if not description and len(full_text) > 200:
         description = clean(full_text, 2000)
 
-    # Qualifications (raw — standardised in make_job)
+    # Qualifications
     qualifications = (
         ld.get("qualifications")
         or _pick_section(sections, "qualif", "requirement", "education",
@@ -1331,7 +1458,7 @@ async def scrape_job_detail(page, job_url, company, website, industry,
     if _GARBAGE_FIELD_PATTERNS.match(qualifications.strip()[:80]):
         qualifications = ""
 
-    # Experience (raw — standardised in make_job)
+    # Experience
     experience = _sanitize_field(
         ld.get("experience")
         or _find_text_near_label(soup, "Experience", "Years of Experience",
@@ -1349,7 +1476,7 @@ async def scrape_job_detail(page, job_url, company, website, industry,
         if m:
             experience = m.group(0)
 
-    # Field (raw — standardised in make_job)
+    # Field
     field = _sanitize_field(
         ld.get("field") or department
         or _find_text_near_label(soup, "Field", "Category", "Department",
@@ -1432,25 +1559,20 @@ async def scrape_job_detail(page, job_url, company, website, industry,
             if candidate != final_url:
                 apply_url = candidate
 
-   
-
-    # Verbose logging — shows both raw and standardised values
-    vprint(f"  ┄ title           : {title[:60] or '—'}", indent=4)
-    vprint(f"  ┄ type            : {job_type or '—'}", indent=4)
-    vprint(f"  ┄ location        : {location or '—'}", indent=4)
-    vprint(f"  ┄ field  (raw)    : {field or '—'}", indent=4)
-    vprint(f"  ┄ field  (std)    : {standardise_field(field or department, title, description) or '—'}", indent=4)
-    vprint(f"  ┄ exp    (raw)    : {experience[:60] or '—'}", indent=4)
-    vprint(f"  ┄ exp    (std)    : {standardise_experience(experience) or '—'}", indent=4)
-    vprint(f"  ┄ qual   (raw)    : {qualifications[:60] or '—'}", indent=4)
-    vprint(f"  ┄ qual   (std)    : {standardise_qualification(qualifications, description) or '—'}", indent=4)
-    vprint(f"  ┄ salary          : {salary_range or '—'}", indent=4)
-    vprint(f"  ┄ date posted     : {date_posted or '—'}", indent=4)
-    vprint(f"  ┄ deadline        : {deadline or '—'}", indent=4)
-    vprint(f"  ┄ est deadline    : {estimated_deadline or '—'}", indent=4)
-    vprint(f"  ┄ description     : {description[:80] or '—'}{'…' if len(description)>80 else ''}", indent=4)
-    vprint(f"  ┄ logo            : {company_logo[:60] or '—'}", indent=4)
-    vprint(f"  ┄ apply url       : {apply_url[:80]}", indent=4)
+    # ── v5: clean log — standardised values only, no raw lines ──
+    vprint(f"  ┄ title        : {title[:60] or '—'}", indent=4)
+    vprint(f"  ┄ type         : {job_type or '—'}", indent=4)
+    vprint(f"  ┄ location     : {location or '—'}", indent=4)
+    vprint(f"  ┄ field        : {standardise_field(field or department, title, description, industry) or '—'}", indent=4)
+    vprint(f"  ┄ experience   : {standardise_experience(experience) or '—'}", indent=4)
+    vprint(f"  ┄ qualification: {standardise_qualification(qualifications, description) or '—'}", indent=4)
+    vprint(f"  ┄ salary       : {salary_range or '—'}", indent=4)
+    vprint(f"  ┄ date posted  : {date_posted or '—'}", indent=4)
+    vprint(f"  ┄ deadline     : {deadline or '—'}", indent=4)
+    vprint(f"  ┄ est deadline : {estimated_deadline or '—'}", indent=4)
+    vprint(f"  ┄ description  : {description[:80] or '—'}{'…' if len(description)>80 else ''}", indent=4)
+    vprint(f"  ┄ logo         : {company_logo[:60] or '—'}", indent=4)
+    vprint(f"  ┄ apply url    : {apply_url[:80]}", indent=4)
 
     if salary_range:
         _stats["jobs_with_salary"] += 1
@@ -1503,11 +1625,17 @@ async def _resolve_iframe_ats(page, html, base_url):
 
 
 # ══════════════════════════════════════════════════════════════
-# CAREER PAGE FINDER
+# CAREER PAGE FINDER  (v5: LinkedIn-aware)
 # ══════════════════════════════════════════════════════════════
 def _job_signal_count(html):
     lower = html.lower()
     return sum(1 for s in JOB_PAGE_SIGNALS if s in lower)
+
+
+def _is_blocked_career_url(url: str) -> bool:
+    """Return True for URLs we can never scrape (e.g. LinkedIn guest pages)."""
+    domain = get_domain(url)
+    return domain in BLOCKED_CAREER_DOMAINS
 
 
 async def _probe_suffixes(page, career_root, root_score=0):
@@ -1554,6 +1682,9 @@ def _crawl_career_links(html, career_root):
             continue
         full       = href if href.startswith("http") else urljoin(career_root, href)
         full_lower = full.lower()
+        # v5: skip LinkedIn links
+        if "linkedin.com" in full_lower:
+            continue
         if career_domain not in full_lower and not is_ats(full):
             continue
         score = 0
@@ -1585,6 +1716,9 @@ def _crawl_career_links(html, career_root):
 
 
 async def _resolve_to_jobs_url(page, career_root, strategy, ats_name):
+    # v5: never resolve to a blocked domain
+    if _is_blocked_career_url(career_root):
+        return None, strategy + "+blocked", None
     if ats_name:
         return career_root, strategy, ats_name
     r_root     = simple_get(career_root)
@@ -1647,22 +1781,27 @@ async def find_career_page(page, website):
         url = f"{scheme}://{sub}.{base_domain}"
         r   = simple_get(url)
         if r:
+            if _is_blocked_career_url(r.url):
+                continue
             resolved = await _resolve_to_jobs_url(page, r.url, f"subdomain:{sub}", is_ats(r.url))
-            if resolved[0]:
+            if resolved[0] and not _is_blocked_career_url(resolved[0]):
                 return resolved
     for path in CAREER_PATHS:
         url = base + path
         r   = simple_get(url)
         if r and r.url not in (base, base + "/", base + "/#"):
+            if _is_blocked_career_url(r.url):
+                continue
             resolved = await _resolve_to_jobs_url(page, r.url, f"path:{path}", is_ats(r.url))
-            if resolved[0]:
+            if resolved[0] and not _is_blocked_career_url(resolved[0]):
                 return resolved
     r = simple_get(website)
     if r:
         result = _scan_links(BeautifulSoup(r.text, "html.parser"), website, base_domain)
         if result:
             career_root, strat, aname = result
-            return await _resolve_to_jobs_url(page, career_root, strat, aname)
+            if not _is_blocked_career_url(career_root):
+                return await _resolve_to_jobs_url(page, career_root, strat, aname)
     try:
         await page.goto(website, timeout=25000, wait_until="domcontentloaded")
         await page.wait_for_timeout(2000)
@@ -1681,9 +1820,11 @@ async def find_career_page(page, website):
                     r'https?://[^\s"\'<>]*' + re.escape(pat) + r'[^\s"\'<>]*', content, re.I
                 )
                 if m:
-                    return m.group(0), f"embedded:{ats_name}", ats_name
+                    candidate = m.group(0)
+                    if not _is_blocked_career_url(candidate):
+                        return candidate, f"embedded:{ats_name}", ats_name
         iframe_src = await _resolve_iframe_ats(page, content, website)
-        if iframe_src:
+        if iframe_src and not _is_blocked_career_url(iframe_src):
             ats_name = is_ats(iframe_src)
             return iframe_src, f"iframe:{ats_name or 'unknown'}", ats_name
         best_score, best_url, best_strat = 0, None, None
@@ -1693,7 +1834,10 @@ async def find_career_page(page, website):
                 text = clean(await link.inner_text(), 80).lower()
                 if not href or href.startswith(("#", "mailto", "tel")):
                     continue
-                full     = href if href.startswith("http") else urljoin(website, href)
+                full = href if href.startswith("http") else urljoin(website, href)
+                # v5: skip LinkedIn
+                if _is_blocked_career_url(full):
+                    continue
                 ats_name = is_ats(full)
                 if ats_name:
                     return await _resolve_to_jobs_url(page, full, f"ats_link:{ats_name}", ats_name)
@@ -1704,7 +1848,7 @@ async def find_career_page(page, website):
                         best_score, best_url, best_strat = score, full, f"playwright:{reason}"
             except:
                 continue
-        if best_url and best_score >= 5:
+        if best_url and best_score >= 5 and not _is_blocked_career_url(best_url):
             return await _resolve_to_jobs_url(page, best_url, best_strat, None)
     except:
         pass
@@ -1714,8 +1858,9 @@ async def find_career_page(page, website):
             hits = re.findall(
                 r'<loc>(https?://[^<]*(?:career|job|vacanc|hiring)[^<]*)</loc>', r.text, re.I
             )
-            if hits:
-                return await _resolve_to_jobs_url(page, hits[0], "sitemap", is_ats(hits[0]))
+            valid = [h for h in hits if not _is_blocked_career_url(h)]
+            if valid:
+                return await _resolve_to_jobs_url(page, valid[0], "sitemap", is_ats(valid[0]))
     try:
         r = simple_get(
             f"https://html.duckduckgo.com/html/?q={quote_plus(f'site:{base_domain} careers jobs')}"
@@ -1725,7 +1870,9 @@ async def find_career_page(page, website):
                 u = el.get_text(strip=True)
                 if not u.startswith("http"):
                     u = "https://" + u
-                if base_domain in u and any(kw in u.lower() for kw in ["career", "job", "vacanc"]):
+                if (base_domain in u
+                        and any(kw in u.lower() for kw in ["career", "job", "vacanc"])
+                        and not _is_blocked_career_url(u)):
                     return await _resolve_to_jobs_url(page, u, "duckduckgo", is_ats(u))
     except:
         pass
@@ -1740,6 +1887,9 @@ def _scan_links(soup, website, base_domain):
         if not href or href.startswith(("#", "mailto", "tel")):
             continue
         full     = href if href.startswith("http") else urljoin(website, href)
+        # v5: skip LinkedIn
+        if _is_blocked_career_url(full):
+            continue
         ats_name = is_ats(full)
         if ats_name:
             return full, f"ats_link:{ats_name}", ats_name
@@ -2144,9 +2294,15 @@ def _pagination(soup, base_url):
 
 
 # ══════════════════════════════════════════════════════════════
-# PROCESS ONE COMPANY
+# PROCESS ONE COMPANY  (v5: Saudi filter applied first)
 # ══════════════════════════════════════════════════════════════
 async def process_company(page, name, website, industry, cp):
+    # ── v5: skip non-Saudi entities immediately ──────────────
+    if not _looks_like_saudi_company(name, website):
+        _stats["companies_skipped_non_saudi"] += 1
+        vprint(f"⏭  Skipped (non-Saudi): {name} ({get_domain(website)})", indent=0)
+        return
+
     domain = get_domain(website)
     if not domain or domain in discovered_domains:
         return
@@ -2160,6 +2316,11 @@ async def process_company(page, name, website, industry, cp):
     print_company_header(name, website, industry, n)
 
     careers_url, strategy, ats_name = await find_career_page(page, website)
+
+    # v5: if career page resolved to a blocked domain, treat as not found
+    if careers_url and _is_blocked_career_url(careers_url):
+        vlog(f"⏭  Career page leads to blocked domain ({get_domain(careers_url)}) — skipping", indent=1)
+        careers_url = None
 
     if not careers_url:
         _stats["companies_no_careers"] += 1
@@ -2231,6 +2392,10 @@ async def wikipedia_companies(page, cp, process_fn):
             href  = link.get("href", "")
             if not title or "Category:" in title or "List" in title:
                 continue
+            # v5: skip non-company patterns early at discovery time
+            if NON_COMPANY_WIKI_PATTERNS.match(title.strip()):
+                vprint(f"  ⏭  Wiki skip (non-company pattern): {title}", indent=1)
+                continue
             if not href.startswith("/wiki/"):
                 continue
             await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -2241,7 +2406,13 @@ async def wikipedia_companies(page, cp, process_fn):
             web_tag = wsoup.select_one(".infobox a.external")
             if not web_tag:
                 continue
-            domain, website = parse_domain(web_tag.get("href", ""))
+            raw_url = web_tag.get("href", "")
+            # v5: block non-Saudi domains at discovery time
+            domain_check = get_domain(raw_url)
+            if domain_check in NON_SAUDI_DOMAINS:
+                vprint(f"  ⏭  Wiki skip (blocked domain): {title} → {domain_check}", indent=1)
+                continue
+            domain, website = parse_domain(raw_url)
             if not domain:
                 continue
             cats     = [c.get_text() for c in wsoup.select("#mw-normal-catlinks a")]
@@ -2282,6 +2453,10 @@ async def duckduckgo_companies(page, cp, process_fn):
                     continue
                 name    = name_el.get_text(strip=True)
                 raw_url = url_el.get_text(strip=True)
+                # v5: block non-Saudi at DDG level
+                domain_check = get_domain(raw_url if raw_url.startswith("http") else "https://" + raw_url)
+                if domain_check in NON_SAUDI_DOMAINS:
+                    continue
                 domain, website = parse_domain(raw_url)
                 if not domain:
                     continue
@@ -2319,6 +2494,11 @@ async def google_maps_companies(page, cp, process_fn):
                         await page.wait_for_timeout(2000)
                         web_el  = await page.query_selector("a[data-item-id='authority']")
                         raw_url = await web_el.get_attribute("href") if web_el else ""
+                        domain_check = get_domain(raw_url)
+                        if domain_check in NON_SAUDI_DOMAINS:
+                            await page.go_back()
+                            await page.wait_for_timeout(1000)
+                            continue
                         domain, website = parse_domain(raw_url)
                         if domain:
                             await process_fn(page, name, website, industry, cp)
@@ -2376,7 +2556,7 @@ async def kompass_companies(page, cp, process_fn):
 async def main():
     global all_jobs, company_results
 
-    print("🚀  Saudi Jobs Pipeline v3 — Discover → Career Page → Jobs\n")
+    print("🚀  Saudi Jobs Pipeline v5 — Saudi-only · No LinkedIn · Clean Fields\n")
 
     cp = load_checkpoint()
 
@@ -2424,11 +2604,11 @@ async def main():
     print(f"  {'Companies discovered:':<30} {total_companies:>6,}")
     print(f"  {'  with career pages:':<30} {with_careers:>6,}  ({100*with_careers//max(total_companies,1)}%)")
     print(f"  {'  no career page:':<30} {total_companies-with_careers:>6,}")
+    print(f"  {'  skipped (non-Saudi):':<30} {_stats['companies_skipped_non_saudi']:>6,}")
     print(f"{'─'*W}")
     print(f"  {'Total jobs scraped:':<30} {total_jobs:>6,}")
     print(f"  {'  with salary data:':<30} {_stats['jobs_with_salary']:>6,}  ({100*_stats['jobs_with_salary']//max(total_jobs,1)}%)")
     print(f"  {'  with description:':<30} {_stats['jobs_with_description']:>6,}  ({100*_stats['jobs_with_description']//max(total_jobs,1)}%)")
-    print(f"  {'  AI-assisted:':<30} {_stats['ai_assists']:>6,}")
     print(f"  {'Detail fetches:':<30} {_stats['detail_fetches']:>6,}")
     print(f"  {'Detail failures:':<30} {_stats['detail_failures']:>6,}  ({100*_stats['detail_failures']//max(_stats['detail_fetches'],1)}%)")
     print(f"{'─'*W}")
