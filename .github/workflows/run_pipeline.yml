@@ -1,0 +1,57 @@
+name: Saudi Jobs Pipeline
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # daily at 02:00 UTC
+  workflow_dispatch:        # manual trigger button in GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore checkpoint cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            pipeline_checkpoint.json
+            saudi_jobs.csv
+            saudi_companies_found.csv
+          key: pipeline-data-${{ github.run_id }}
+          restore-keys: pipeline-data-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libasound2
+
+      - name: Install Python dependencies
+        run: pip install playwright pandas beautifulsoup4 requests nest_asyncio tqdm
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python sa-s.py
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: saudi-jobs-${{ github.run_number }}
+          path: |
+            saudi_jobs.csv
+            saudi_companies_found.csv
+          retention-days: 30
